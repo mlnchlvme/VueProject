@@ -37,45 +37,50 @@
 import { ref } from "vue";
 import { swap, adjacent } from "./matchCore.js";
 import {
-  CellType, createLevel,
-  resolveWithCells, swapLeadsToMatchWithCells, canSwap
+  CellType, 
+  resolveWithCells, swapLeadsToMatchWithCells, canSwap, createLevelFromMap
 } from "./matchCore.js";
 
 const COLORS = 5;
-const SIZE = 9;
 const PALETTE = ["#ffd166","#06d6a0","#ef476f","#118ab2","#c6a7ff"];
 
 const levels = ref([
-
-  { size: SIZE, colors: COLORS, blocked: [], crates: [] },
-
-  { size: SIZE, colors: COLORS, 
-    blocked: [
-      {r:0,c:0},
-      {r:0,c:1},
-      {r:0,c:2},
-      {r:1,c:0}, 
-      {r:1,c:1}, 
-      {r:2,c:0}, 
-    ], 
-    crates: [] 
-  },
-
-  { size: SIZE, colors: COLORS, 
-    blocked: [
-      {r:1,c:1},
-      {r:1,c:2},
-      {r:1,c:3},
-      {r:2,c:1}
-    ], 
-    crates: [
-      {r:4,c:4},
-      {r:4,c:5},
-      {r:5,c:4}
-    ] 
-  },
-
+  [
+    "111000000",
+    "110000000",
+    "1000#0000", 
+    "000##0000",
+    "000000000",
+    "000000000",
+    "00000#001",
+    "000000011",
+    "000000111",
+    
+  ],
+  [
+    "111100000",
+    "100000000",
+    "1000##000", 
+    "1000##000",
+    "000000000",
+    "00000#000",
+    "00000#000",
+    "000000001",
+    "111111111",
+  ],
+  [
+    "111110000",
+    "100000000",
+    "10000##00", 
+    "10000##00",
+    "000000000",
+    "000000000",
+    "0000000#0",
+    "0000000#0",
+    "000000011",
+  ],
 ]);
+
 
 const levelIndex = ref(0);
 const tiles = ref(null);
@@ -85,13 +90,18 @@ const dragFrom = ref(null);
 const dragOverCell = ref(null);
 
 function loadLevel() {
-  const cfg = levels.value[levelIndex.value];
-  const { tiles: t, cells: c } = createLevel(cfg);
+  const map = levels.value[levelIndex.value];
+  const { tiles: t, cells: c } = createLevelFromMap(map, {
+    colors: COLORS,
+    symbols: { "0": "empty", "1": "blocked", "#": "crate"},
+  });
   tiles.value = t;
   cells.value = c;
   dragFrom.value = null;
   dragOverCell.value = null;
 }
+
+
 function restart() { loadLevel(); }
 loadLevel();
 
@@ -141,8 +151,9 @@ function onDrop(r, c, e) {
   }
   if (swapLeadsToMatchWithCells(tiles.value, cells.value, a, b)) {
     swap(tiles.value, a, b);
-    resolveWithCells(tiles.value, cells.value, levels.value[levelIndex.value].colors);
+    resolveWithCells(tiles.value, cells.value, COLORS); // ← фикс
   }
+
   dragFrom.value = null; dragOverCell.value = null;
 }
 function onDragEnd() { dragFrom.value = null; dragOverCell.value = null; }
