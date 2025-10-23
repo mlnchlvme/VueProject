@@ -1,4 +1,3 @@
-
 export function adjacent(a, b) {
   return a && b && (
     (a.r === b.r && Math.abs(a.c - b.c) === 1) ||
@@ -12,7 +11,6 @@ export function swap(board, a, b) {
   board[b.r][b.c] = t;
 }
 
-
 export function clearMatches(board, matchedSet) {
   let cleared = 0;
   for (const key of matchedSet) {
@@ -25,18 +23,25 @@ export function clearMatches(board, matchedSet) {
   return cleared;
 }
 
-
 export const CellType = {
   Empty:  "empty",
-  Block:  "blocked", 
+  Block:  "blocked",
   Crate:  "crate",
 };
+
+const Booster = {
+  Row:  -1,
+  Col:  -2,
+};
+
+function isNormal(val){ return typeof val === "number" && val >= 0; }
+function isBooster(val){ return val === Booster.Row || val === Booster.Col; }
 
 export function createLevel({
   size = 8,
   colors = 5,
-  blocked = [], // [{r,c}]
-  crates  = [], // [{r,c}]
+  blocked = [],
+  crates  = [],
 } = {}) {
   const cells = Array.from({ length: size }, () =>
     Array.from({ length: size }, () => CellType.Empty)
@@ -74,8 +79,8 @@ export function findMatchesWithCells(tiles, cells) {
       const curVal  = c < size ? tiles[r][c] : Symbol("s");
       const prevVal = tiles[r][c - 1];
 
-      const curOK  = c < size && cells[r][c]     === CellType.Empty && curVal  != null;
-      const prevOK =            cells[r][c - 1]   === CellType.Empty && prevVal != null;
+      const curOK  = c < size && cells[r][c]     === CellType.Empty && curVal  != null && isNormal(curVal);
+      const prevOK =            cells[r][c - 1]   === CellType.Empty && prevVal != null && isNormal(prevVal);
 
       if (curOK && prevOK && curVal === prevVal) {
         runLen++;
@@ -88,15 +93,14 @@ export function findMatchesWithCells(tiles, cells) {
     }
   }
 
-  // столбцы
   for (let c = 0; c < size; c++) {
     let runStart = 0, runLen = 1;
     for (let r = 1; r <= size; r++) {
       const curVal  = r < size ? tiles[r][c] : Symbol("s");
       const prevVal = tiles[r - 1][c];
 
-      const curOK  = r < size && cells[r][c]     === CellType.Empty && curVal  != null;
-      const prevOK =           cells[r - 1][c]   === CellType.Empty && prevVal != null;
+      const curOK  = r < size && cells[r][c]     === CellType.Empty && curVal  != null && isNormal(curVal);
+      const prevOK =           cells[r - 1][c]   === CellType.Empty && prevVal != null && isNormal(prevVal);
 
       if (curOK && prevOK && curVal === prevVal) {
         runLen++;
@@ -118,18 +122,15 @@ export function clearMatchesWithCells(tiles, matchedSet) {
 export function breakAdjacentCrates(cells, tilesClearedThisStep) {
   for (const key of tilesClearedThisStep) {
     const [r, c] = key.split(",").map(Number);
-
     for (const [dr, dc] of [[1,0],[-1,0],[0,1],[0,-1]]) {
       const rr = r + dr, cc = c + dc;
       if (rr < 0 || cc < 0 || rr >= cells.length || cc >= cells.length) continue;
-
       if (cells[rr][cc] === CellType.Crate) {
         cells[rr][cc] = CellType.Empty;
       }
     }
   }
 }
-
 
 export function collapseWithCells(tiles, cells) {
   const size = tiles.length;
@@ -138,7 +139,6 @@ export function collapseWithCells(tiles, cells) {
     for (let r = size - 1; r >= 0; r--) {
       const cell = cells[r][c];
       if (cell !== CellType.Empty) {
-        // встретили преграду — новый сегмент выше неё
         write = r - 1;
       } else if (tiles[r][c] != null) {
         if (write !== r) {
@@ -164,30 +164,23 @@ export function refillWithCells(tiles, cells, colors) {
 
 export function resolveWithCells(tiles, cells, colors) {
   let changed = false;
-
   while (true) {
     const matches = findMatchesWithCells(tiles, cells);
     if (matches.size === 0) break;
-
     clearMatchesWithCells(tiles, matches);
-
     breakAdjacentCrates(cells, matches);
-
     collapseWithCells(tiles, cells);
     refillWithCells(tiles, cells, colors);
-
     changed = true;
   }
-
   return changed;
 }
-
 
 export function swapLeadsToMatchWithCells(tiles, cells, a, b) {
   if (!canSwap(cells, a, b)) return false;
   swap(tiles, a, b);
   const ok = findMatchesWithCells(tiles, cells).size > 0;
-  swap(tiles, a, b); // откат
+  swap(tiles, a, b);
   return ok;
 }
 
@@ -200,8 +193,8 @@ function safeRandom2(tiles, cells, r, c, colors) {
     const left2 = c >= 2 ? tiles[r][c - 2] : -1;
     const up1   = r >= 1 ? tiles[r - 1][c] : -1;
     const up2   = r >= 2 ? tiles[r - 2][c] : -1;
-    const makesRow = color === left1 && color === left2;
-    const makesCol = color === up1   && color === up2;
+    const makesRow = color === left1 && color === left2 && isNormal(left1) && isNormal(left2);
+    const makesCol = color === up1   && color === up2   && isNormal(up1)   && isNormal(up2);
     if (!makesRow && !makesCol) return color;
     if (++tries > 20) return color;
   }
@@ -210,32 +203,135 @@ function safeRandom2(tiles, cells, r, c, colors) {
 function inBoundsRC(size, r, c) { return r >= 0 && r < size && c >= 0 && c < size; }
 
 export function levelFromMap(rows, { colors = 5, symbols } = {}) {
-
   const N = rows.length;
-  
   const map = Object.assign({
     "0": "empty",
     "1": "blocked",
     "#": "crate",
   }, symbols || {});
-
   const blocked = [];
   const crates  = [];
-
   for (let r = 0; r < N; r++) {
     const line = rows[r];
     for (let c = 0; c < N; c++) {
       const ch = line[c];
-      const type = map[ch] ?? "empty"; // незнакомые символы считаем пустыми
+      const type = map[ch] ?? "empty";
       if (type === "blocked") blocked.push({ r, c });
       else if (type === "crate") crates.push({ r, c });
     }
   }
-
   return { size: N, colors, blocked, crates };
 }
 
 export function createLevelFromMap(rows, opts = {}) {
   const cfg = levelFromMap(rows, opts);
-  return createLevel(cfg); 
+  return createLevel(cfg);
+}
+
+function countRun(tiles, cells, r, c, deltaRow, deltaColumn) {
+  const size = tiles.length;
+  const base = tiles[r][c];
+  if (!isNormal(base) || cells[r][c] !== CellType.Empty) return 0;
+  let len = 1;
+  let rr = r + deltaRow, cc = c + deltaColumn;
+  while (inBoundsRC(size, rr, cc) && cells[rr][cc] === CellType.Empty && tiles[rr][cc] === base && isNormal(tiles[rr][cc])) {
+    len++; rr += deltaRow; cc += deltaColumn;
+  }
+  rr = r - deltaRow; cc = c - deltaColumn;
+  while (inBoundsRC(size, rr, cc) && cells[rr][cc] === CellType.Empty && tiles[rr][cc] === base && isNormal(tiles[rr][cc])) {
+    len++; rr -= deltaRow; cc -= deltaColumn;
+  }
+  return len;
+}
+
+function placeBoosterAt(tiles, pos, horizonthalCombo, verticalCombo) {
+  if (horizonthalCombo >= 4) {
+    tiles[pos.r][pos.c] = Booster.Col;
+    return true;
+  }
+  if (verticalCombo >= 4) {
+    tiles[pos.r][pos.c] = Booster.Row;
+    return true;
+  }
+  return false;
+}
+
+function clearLineByBooster(tiles, cells, pos, type) {
+  const size = tiles.length;
+  const cleared = new Set();
+  if (type === Booster.Row) {
+    const r = pos.r;
+    for (let c = 0; c < size; c++) {
+      if (cells[r][c] !== CellType.Block) {
+        if (cells[r][c] === CellType.Crate) cells[r][c] = CellType.Empty;
+        if (tiles[r][c] != null) {
+          tiles[r][c] = null;
+          cleared.add(`${r},${c}`);
+        }
+      }
+    }
+  }
+  if (type === Booster.Col) {
+    const c = pos.c;
+    for (let r = 0; r < size; r++) {
+      if (cells[r][c] !== CellType.Block) {
+        if (cells[r][c] === CellType.Crate) cells[r][c] = CellType.Empty;
+        if (tiles[r][c] != null) {
+          tiles[r][c] = null;
+          cleared.add(`${r},${c}`);
+        }
+      }
+    }
+  }
+  return cleared;
+}
+
+export function activateBooster(tiles, cells, pos, colors) {
+  if (!inBoundsRC(tiles.length, pos.r, pos.c)) return false;
+  const v = tiles[pos.r][pos.c];
+  if (!isBooster(v)) return false;
+  const cleared = clearLineByBooster(tiles, cells, pos, v);
+  tiles[pos.r][pos.c] = null;
+  if (cleared.size > 0) breakAdjacentCrates(cells, cleared);
+  collapseWithCells(tiles, cells);
+  refillWithCells(tiles, cells, colors);
+  resolveWithCells(tiles, cells, colors);
+  return true;
+}
+
+export function applyMove(tiles, cells, a, b, colors) {
+  if (!inBoundsRC(tiles.length, a.r, a.c) || !inBoundsRC(tiles.length, b.r, b.c)) return false;
+  if (!adjacent(a, b)) return false;
+
+  const aBooster = isBooster(tiles[a.r][a.c]);
+  const bBooster = isBooster(tiles[b.r][b.c]);
+
+  if (aBooster || bBooster) {
+    swap(tiles, a, b);
+    const boosterPos = isBooster(tiles[a.r][a.c]) ? a : b;
+    const ok = activateBooster(tiles, cells, boosterPos, colors);
+    return ok;
+  }
+
+  if (!canSwap(cells, a, b)) return false;
+
+  swap(tiles, a, b);
+
+  const matches = findMatchesWithCells(tiles, cells);
+  if (matches.size === 0) {
+    swap(tiles, a, b);
+    return false;
+  }
+
+  const horLen = countRun(tiles, cells, b.r, b.c, 0, 1);
+  const verLen = countRun(tiles, cells, b.r, b.c, 1, 0);
+  const placed = placeBoosterAt(tiles, b, horLen, verLen);
+  if (placed) matches.delete(`${b.r},${b.c}`);
+
+  clearMatchesWithCells(tiles, matches);
+  breakAdjacentCrates(cells, matches);
+  collapseWithCells(tiles, cells);
+  refillWithCells(tiles, cells, colors);
+  resolveWithCells(tiles, cells, colors);
+  return true;
 }
