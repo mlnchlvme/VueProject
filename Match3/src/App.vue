@@ -4,11 +4,11 @@
       <select v-model.number="levelIndex" @change="loadLevel">
         <option v-for="(lv, i) in levels" :key="i" :value="i">Level {{ i + 1 }}</option>
       </select>
-      <button @click="restart">Restart</button>
+      <button @click="restart" :disabled="animating">Restart</button>
     </div>
 
-    <div ref="grid" role="grid" style="touch-action:none; user-select:none;">
-      <div v-for="(row, r) in tiles" :key="r" role="row" style="display:flex">
+    <div ref="grid" role="grid" class="grid">
+      <div v-for="(row, r) in tiles" :key="r" role="row" class="row">
         <div
           v-for="(val, c) in row"
           :key="c"
@@ -16,15 +16,19 @@
           :data-r="r"
           :data-c="c"
           :style="cellStyle(cells[r][c])"
-          style="touch-action:none; cursor:pointer;"
+          @pointerdown.prevent
+          style="cursor:pointer"
         >
           <div
             v-if="val != null"
             class="tile"
-            :class="boosterClass(val)"
+            :class="[
+              boosterClass(val),
+              clearing.has(key(r,c)) ? 'tile-clearing' : '',
+              appearKeys.has(key(r,c)) ? 'tile-appear' : ''
+            ]"
             :style="tileStyle(val)"
             role="gridcell"
-            style="touch-action:none"
             @click="onTileClick(r, c)"
           >
             <svg v-if="val === Booster.Row" viewBox="0 0 100 100" class="g">
@@ -36,25 +40,34 @@
           </div>
         </div>
       </div>
+
+      <div v-if="sweep.active" class="sweep" :style="sweepStyle"></div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, watch, onMounted, onBeforeUnmount, nextTick, computed } from "vue";
 import { usePointerSwipe } from "@vueuse/core";
 import {
   CellType,
   createLevelFromMap,
-  applyMove,
+  canSwap,
+  swap,
+  swapLeadsToMatchWithCells,
+  findMatchesWithCells,
+  clearMatches,
+  breakAdjacentCrates,
+  collapseWithCells,
+  refillWithCells,
   activateBooster,
 } from "./matchCore.js";
 
 const COLORS = 5;
 const PALETTE = ["#ffd166", "#06d6a0", "#ef476f", "#118ab2", "#c6a7ff"];
-
 const Booster = { Row: -1, Col: -2 };
 const isBoosterVal = (v) => v === Booster.Row || v === Booster.Col;
+const isNormalVal = (v) => v != null && v >= 0;
 
 const levels = ref([
   [
@@ -90,11 +103,30 @@ const levels = ref([
     "0000000#0",
     "000000011",
   ],
+  [
+    "111110000",
+    "111000000",
+    "11000##00",
+    "100####00",
+    "000000000",
+    "000000000",
+    "0000000#0",
+    "00######0",
+    "000000011",
+  ],
 ]);
 
 const levelIndex = ref(0);
 const tiles = ref([]);
 const cells = ref([]);
+const animating = ref(false);
+
+const clearing = ref(new Set());
+const appearKeys = ref(new Set());
+
+const grid = ref(null);
+
+function key(r, c) { return `${r},${c}`; }
 
 function loadLevel() {
   const map = levels.value[levelIndex.value];
@@ -104,8 +136,10 @@ function loadLevel() {
   });
   tiles.value = t;
   cells.value = c;
+  clearing.value.clear();
+  appearKeys.value.clear();
 }
-function restart() { loadLevel(); }
+function restart() { if (!animating.value) loadLevel(); }
 loadLevel();
 
 function cellStyle(cellType) {
@@ -153,13 +187,133 @@ function boosterClass(v) {
   return "";
 }
 
-function onTileClick(r, c) {
-  const v = tiles.value[r][c];
-  if (!isBoosterVal(v)) return;
-  activateBooster(tiles.value, cells.value, { r, c }, COLORS);
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+const lastMoveDest = ref(null);
+const pendingBooster = ref(false);
+
+function runLenAt(pos, dr, dc) {
+  const N = tiles.value.length;
+  const base = tiles.value[pos.r]?.[pos.c];
+  if (!isNormalVal(base) || cells.value[pos.r]?.[pos.c] !== CellType.Empty) return 0;
+  let len = 1;
+  let rr = pos.r + dr, cc = pos.c + dc;
+  while (rr >= 0 && cc >= 0 && rr < N && cc < N &&
+         cells.value[rr][cc] === CellType.Empty &&
+         tiles.value[rr][cc] === base && isNormalVal(tiles.value[rr][cc])) {
+    len++; rr += dr; cc += dc;
+  }
+  rr = pos.r - dr; cc = pos.c - dc;
+  while (rr >= 0 && cc >= 0 && rr < N && cc < N &&
+         cells.value[rr][cc] === CellType.Empty &&
+         tiles.value[rr][cc] === base && isNormalVal(tiles.value[rr][cc])) {
+    len++; rr -= dr; cc -= dc;
+  }
+  return len;
 }
 
-const grid = ref(null);
+async function animateResolveCascade() {
+  let firstLoop = true;
+  while (true) {
+    const matches = findMatchesWithCells(tiles.value, cells.value);
+    if (matches.size === 0) break;
+
+    if (firstLoop && pendingBooster.value && lastMoveDest.value) {
+      const b = lastMoveDest.value;
+      const hor = runLenAt(b, 0, 1);
+      const ver = runLenAt(b, 1, 0);
+      if (hor >= 4 || ver >= 4) {
+        if (hor >= 4 && ver >= 4) {
+        } else if (hor >= 4) {
+          tiles.value[b.r][b.c] = Booster.Col;
+        } else if (ver >= 4) {
+          tiles.value[b.r][b.c] = Booster.Row;
+        }
+        matches.delete(key(b.r, b.c));
+      }
+      pendingBooster.value = false;
+      lastMoveDest.value = null;
+      firstLoop = false;
+    }
+
+    clearing.value = new Set(matches);
+    await nextTick();
+    await sleep(220);
+
+    clearMatches(tiles.value, matches);
+    breakAdjacentCrates(cells.value, matches);
+    clearing.value.clear();
+    await nextTick();
+
+    collapseWithCells(tiles.value, cells.value);
+    await nextTick();
+    await sleep(120);
+
+    const newSpawns = [];
+    const N = tiles.value.length;
+    for (let r = 0; r < N; r++) {
+      for (let c = 0; c < N; c++) {
+        if (cells.value[r][c] === CellType.Empty && tiles.value[r][c] == null) {
+          newSpawns.push(key(r, c));
+        }
+      }
+    }
+    refillWithCells(tiles.value, cells.value, COLORS);
+    appearKeys.value = new Set(newSpawns);
+    await nextTick();
+    await sleep(180);
+    appearKeys.value.clear();
+  }
+}
+
+const sweep = ref({ active: false, row: null, col: null, type: null });
+const sweepStyle = computed(() => {
+  if (!sweep.value.active) return {};
+  const N = tiles.value.length;
+  const cellW = 44, cellH = 44;
+  if (sweep.value.type === 'row') {
+    const top = sweep.value.row * cellH;
+    return {
+      top: `${top + 2}px`,
+      left: `2px`,
+      width: `${N * cellW - 4}px`,
+      height: `36px`,
+      transform: 'scaleX(0)',
+      animation: 'sweepX 260ms ease-out forwards',
+    };
+  } else {
+    const left = sweep.value.col * cellW;
+    return {
+      top: `2px`,
+      left: `${left + 2}px`,
+      width: `36px`,
+      height: `${N * cellH - 4}px`,
+      transform: 'scaleY(0)',
+      animation: 'sweepY 260ms ease-out forwards',
+    };
+  }
+});
+
+function onTileClick(r, c) {
+  if (animating.value) return;
+  const v = tiles.value[r][c];
+  if (!isBoosterVal(v)) return;
+  runBooster({ r, c }, v);
+}
+
+async function runBooster(pos, v) {
+  animating.value = true;
+  if (v === Booster.Row) sweep.value = { active: true, row: pos.r, col: null, type: 'row' };
+  else sweep.value = { active: true, row: null, col: pos.c, type: 'col' };
+  await nextTick();
+  await sleep(260);
+  sweep.value = { active: false, row: null, col: null, type: null };
+
+  activateBooster(tiles.value, cells.value, pos, COLORS);
+  await nextTick();
+  await animateResolveCascade();
+  animating.value = false;
+}
 
 function cellFromNode(node) {
   const el = node instanceof Element ? node.closest(".cell") : null;
@@ -175,13 +329,33 @@ function cellFromPageXY(pageX, pageY) {
   const node = document.elementFromPoint(clientX, clientY);
   return cellFromNode(node);
 }
-
 const deltaMap = {
   left:  { r: 0,  c: -1 },
   right: { r: 0,  c:  1 },
   up:    { r: -1, c:  0 },
   down:  { r: 1,  c:  0 },
 };
+
+async function swapThenActivateBoosters(from, to) {
+  animating.value = true;
+  swap(tiles.value, from, to);
+  await nextTick();
+  await sleep(120);
+
+  const posA = { r: from.r, c: from.c };
+  const posB = { r: to.r, c: to.c };
+  const list = [];
+  const vA = tiles.value[posA.r][posA.c];
+  const vB = tiles.value[posB.r][posB.c];
+  if (isBoosterVal(vA)) list.push({ pos: posA, v: vA });
+  if (isBoosterVal(vB)) list.push({ pos: posB, v: vB });
+
+  for (const item of list) {
+    await runBooster(item.pos, item.v);
+  }
+
+  animating.value = false;
+}
 
 let stopWatch = null;
 onMounted(() => {
@@ -190,17 +364,40 @@ onMounted(() => {
     pointerTypes: ["mouse", "touch", "pen"],
   });
 
-  stopWatch = watch(swipe.isSwiping, (now, was) => {
+  stopWatch = watch(swipe.isSwiping, async (now, was) => {
     if (was && !now) {
+      if (animating.value) return;
       const dir = swipe.direction.value;
       const s = swipe.coordsStart.value;
       if (!dir || !s) return;
+
       const from = cellFromPageXY(s.x, s.y);
       if (!from) return;
+
       const delta = deltaMap[dir];
       if (!delta) return;
       const to = { r: from.r + delta.r, c: from.c + delta.c };
-      applyMove(tiles.value, cells.value, from, to, COLORS);
+
+      const a = tiles.value[from.r]?.[from.c];
+      const b = tiles.value[to.r]?.[to.c];
+
+      if (isBoosterVal(a) || isBoosterVal(b)) {
+        await swapThenActivateBoosters(from, to);
+        return;
+      }
+
+      if (!canSwap(cells.value, from, to)) return;
+      if (!swapLeadsToMatchWithCells(tiles.value, cells.value, from, to)) return;
+
+      animating.value = true;
+      swap(tiles.value, from, to);
+      lastMoveDest.value = to;
+      pendingBooster.value = true;
+      await nextTick();
+      await sleep(120);
+
+      await animateResolveCascade();
+      animating.value = false;
     }
   });
 
@@ -211,8 +408,9 @@ onMounted(() => {
     startCell = cellFromNode(e.target);
     startXY = { x: e.pageX, y: e.pageY };
   };
-  const onUp = (e) => {
+  const onUp = async (e) => {
     if (!startCell || !startXY) return;
+    if (animating.value) { startCell = null; startXY = null; return; }
     const dx = e.pageX - startXY.x;
     const dy = e.pageY - startXY.y;
     const absX = Math.abs(dx), absY = Math.abs(dy);
@@ -222,7 +420,28 @@ onMounted(() => {
     if (!delta) { startCell = null; startXY = null; return; }
     const from = startCell;
     const to = { r: from.r + delta.r, c: from.c + delta.c };
-    applyMove(tiles.value, cells.value, from, to, COLORS);
+
+    const a = tiles.value[from.r]?.[from.c];
+    const b = tiles.value[to.r]?.[to.c];
+
+    if (isBoosterVal(a) || isBoosterVal(b)) {
+      await swapThenActivateBoosters(from, to);
+      startCell = null; startXY = null; return;
+    }
+
+    if (!canSwap(cells.value, from, to)) { startCell = null; startXY = null; return; }
+    if (!swapLeadsToMatchWithCells(tiles.value, cells.value, from, to)) { startCell = null; startXY = null; return; }
+
+    animating.value = true;
+    swap(tiles.value, from, to);
+    lastMoveDest.value = to;
+    pendingBooster.value = true;
+    await nextTick();
+    await sleep(120);
+
+    await animateResolveCascade();
+    animating.value = false;
+
     startCell = null; startXY = null;
   };
   const el = grid.value;
@@ -238,8 +457,34 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.cell, .tile { pointer-events: auto; }
-.booster .g { width: 22px; height: 22px; }
-.booster-row .g rect { fill: #333; }
-.booster-col .g rect { fill: #333; }
+.grid { position: relative; touch-action:none; user-select:none; }
+.row { display:flex; }
+.cell {
+  width: 40px; height: 40px; margin: 2px; border-radius: 8px;
+  display: grid; place-items: center; box-sizing: border-box;
+}
+.tile {
+  width: 34px; height: 34px; border-radius: 8px; box-sizing: border-box;
+  display: grid; place-items: center;
+  transition: transform 120ms ease, opacity 220ms ease, background 120ms ease, border 120ms ease;
+}
+.tile-clearing { opacity: 0; transform: scale(0.85); }
+.tile-appear {
+  opacity: 0; transform: translateY(-12px) scale(0.9);
+  animation: appear 180ms ease-out forwards;
+}
+@keyframes appear { to { opacity: 1; transform: translateY(0) scale(1); } }
+.booster { background:#fff !important; border:2px solid #333 !important; }
+.g { width: 22px; height: 22px; }
+.booster-row .g rect { fill:#333; }
+.booster-col .g rect { fill:#333; }
+.sweep {
+  position: absolute;
+  pointer-events: none;
+  background: radial-gradient(closest-side, rgba(255,255,255,0.8), rgba(255,255,255,0.2), rgba(255,255,255,0));
+  mix-blend-mode: screen;
+  border-radius: 8px;
+}
+@keyframes sweepX { to { transform: scaleX(1); } }
+@keyframes sweepY { to { transform: scaleY(1); } }
 </style>
