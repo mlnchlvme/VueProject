@@ -54,20 +54,19 @@ import {
   createLevelFromMap,
   canSwap,
   swap,
-  swapLeadsToMatchWithCells,
   findMatchesWithCells,
   clearMatches,
   breakAdjacentCrates,
   collapseWithCells,
   refillWithCells,
   activateBooster,
+  wouldSwapCreateMatch,
 } from "./matchCore.js";
 
 const COLORS = 5;
 const PALETTE = ["#ffd166", "#06d6a0", "#ef476f", "#118ab2", "#c6a7ff"];
 const Booster = { Row: -1, Col: -2 };
 const isBoosterVal = (v) => v === Booster.Row || v === Booster.Col;
-const isNormalVal = (v) => v != null && v >= 0;
 
 const levels = ref([
   [
@@ -186,54 +185,59 @@ function boosterClass(v) {
   if (v === Booster.Col) return "booster booster-col";
   return "";
 }
-
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-const lastMoveDest = ref(null);
-const pendingBooster = ref(false);
-
-function runLenAt(pos, dr, dc) {
+function buildBoosterSpawnsFromMatches(matchesSet) {
   const N = tiles.value.length;
-  const base = tiles.value[pos.r]?.[pos.c];
-  if (!isNormalVal(base) || cells.value[pos.r]?.[pos.c] !== CellType.Empty) return 0;
-  let len = 1;
-  let rr = pos.r + dr, cc = pos.c + dc;
-  while (rr >= 0 && cc >= 0 && rr < N && cc < N &&
-         cells.value[rr][cc] === CellType.Empty &&
-         tiles.value[rr][cc] === base && isNormalVal(tiles.value[rr][cc])) {
-    len++; rr += dr; cc += dc;
+  const isIn = (r, c) => matchesSet.has(key(r, c));
+  const spawns = [];
+  for (let r = 0; r < N; r++) {
+    let c = 0;
+    while (c < N) {
+      if (!isIn(r, c)) { c++; continue; }
+      let start = c;
+      while (c < N && isIn(r, c)) c++;
+      const len = c - start;
+      if (len >= 4) {
+        const mid = start + Math.floor(len / 2);
+        spawns.push({ r, c: mid, type: 'H' });
+      }
+    }
   }
-  rr = pos.r - dr; cc = pos.c - dc;
-  while (rr >= 0 && cc >= 0 && rr < N && cc < N &&
-         cells.value[rr][cc] === CellType.Empty &&
-         tiles.value[rr][cc] === base && isNormalVal(tiles.value[rr][cc])) {
-    len++; rr -= dr; cc -= dc;
+  for (let c = 0; c < N; c++) {
+    let r = 0;
+    while (r < N) {
+      if (!isIn(r, c)) { r++; continue; }
+      let start = r;
+      while (r < N && isIn(r, c)) r++;
+      const len = r - start;
+      if (len >= 4) {
+        const mid = start + Math.floor(len / 2);
+        spawns.push({ r: mid, c, type: 'V' });
+      }
+    }
   }
-  return len;
+  const dedup = new Map();
+  for (const s of spawns) {
+    const k = key(s.r, s.c);
+    if (!dedup.has(k)) dedup.set(k, s);
+  }
+  return [...dedup.values()];
 }
 
 async function animateResolveCascade() {
-  let firstLoop = true;
   while (true) {
     const matches = findMatchesWithCells(tiles.value, cells.value);
     if (matches.size === 0) break;
 
-    if (firstLoop && pendingBooster.value && lastMoveDest.value) {
-      const b = lastMoveDest.value;
-      const hor = runLenAt(b, 0, 1);
-      const ver = runLenAt(b, 1, 0);
-      if (hor >= 4 || ver >= 4) {
-        if (hor >= 4 && ver >= 4) {
-        } else if (hor >= 4) {
-          tiles.value[b.r][b.c] = Booster.Col;
-        } else if (ver >= 4) {
-          tiles.value[b.r][b.c] = Booster.Row;
-        }
-        matches.delete(key(b.r, b.c));
-      }
-      pendingBooster.value = false;
-      lastMoveDest.value = null;
-      firstLoop = false;
+    const spawns = buildBoosterSpawnsFromMatches(matches);
+    for (const { r, c, type } of spawns) {
+      if (cells.value[r][c] !== CellType.Empty) continue;
+      const v = tiles.value[r][c];
+      if (v == null || v < 0) continue;
+      if (type === 'H') tiles.value[r][c] = Booster.Col;
+      else tiles.value[r][c] = Booster.Row;
+      matches.delete(key(r, c));
     }
 
     clearing.value = new Set(matches);
@@ -303,16 +307,18 @@ function onTileClick(r, c) {
 
 async function runBooster(pos, v) {
   animating.value = true;
-  if (v === Booster.Row) sweep.value = { active: true, row: pos.r, col: null, type: 'row' };
-  else sweep.value = { active: true, row: null, col: pos.c, type: 'col' };
-  await nextTick();
-  await sleep(260);
-  sweep.value = { active: false, row: null, col: null, type: null };
-
-  activateBooster(tiles.value, cells.value, pos, COLORS);
-  await nextTick();
-  await animateResolveCascade();
-  animating.value = false;
+  try {
+    if (v === Booster.Row) sweep.value = { active: true, row: pos.r, col: null, type: 'row' };
+    else sweep.value = { active: true, row: null, col: pos.c, type: 'col' };
+    await nextTick();
+    await sleep(260);
+    sweep.value = { active: false, row: null, col: null, type: null };
+    activateBooster(tiles.value, cells.value, pos, COLORS);
+    await nextTick();
+    await animateResolveCascade();
+  } finally {
+    animating.value = false;
+  }
 }
 
 function cellFromNode(node) {
@@ -338,23 +344,21 @@ const deltaMap = {
 
 async function swapThenActivateBoosters(from, to) {
   animating.value = true;
-  swap(tiles.value, from, to);
-  await nextTick();
-  await sleep(120);
-
-  const posA = { r: from.r, c: from.c };
-  const posB = { r: to.r, c: to.c };
-  const list = [];
-  const vA = tiles.value[posA.r][posA.c];
-  const vB = tiles.value[posB.r][posB.c];
-  if (isBoosterVal(vA)) list.push({ pos: posA, v: vA });
-  if (isBoosterVal(vB)) list.push({ pos: posB, v: vB });
-
-  for (const item of list) {
-    await runBooster(item.pos, item.v);
+  try {
+    swap(tiles.value, from, to);
+    await nextTick();
+    await sleep(120);
+    const posA = { r: from.r, c: from.c };
+    const posB = { r: to.r, c: to.c };
+    const list = [];
+    const vA = tiles.value[posA.r][posA.c];
+    const vB = tiles.value[posB.r][posB.c];
+    if (isBoosterVal(vA)) list.push({ pos: posA, v: vA });
+    if (isBoosterVal(vB)) list.push({ pos: posB, v: vB });
+    for (const item of list) { await runBooster(item.pos, item.v); }
+  } finally {
+    animating.value = false;
   }
-
-  animating.value = false;
 }
 
 let stopWatch = null;
@@ -370,34 +374,29 @@ onMounted(() => {
       const dir = swipe.direction.value;
       const s = swipe.coordsStart.value;
       if (!dir || !s) return;
-
       const from = cellFromPageXY(s.x, s.y);
       if (!from) return;
-
       const delta = deltaMap[dir];
       if (!delta) return;
       const to = { r: from.r + delta.r, c: from.c + delta.c };
-
       const a = tiles.value[from.r]?.[from.c];
       const b = tiles.value[to.r]?.[to.c];
-
       if (isBoosterVal(a) || isBoosterVal(b)) {
-        await swapThenActivateBoosters(from, to);
+        try { await swapThenActivateBoosters(from, to); }
+        finally { animating.value = false; }
         return;
       }
-
       if (!canSwap(cells.value, from, to)) return;
-      if (!swapLeadsToMatchWithCells(tiles.value, cells.value, from, to)) return;
-
+      if (!wouldSwapCreateMatch(tiles.value, cells.value, from, to)) return;
       animating.value = true;
-      swap(tiles.value, from, to);
-      lastMoveDest.value = to;
-      pendingBooster.value = true;
-      await nextTick();
-      await sleep(120);
-
-      await animateResolveCascade();
-      animating.value = false;
+      try {
+        swap(tiles.value, from, to);
+        await nextTick();
+        await sleep(120);
+        await animateResolveCascade();
+      } finally {
+        animating.value = false;
+      }
     }
   });
 
@@ -420,28 +419,24 @@ onMounted(() => {
     if (!delta) { startCell = null; startXY = null; return; }
     const from = startCell;
     const to = { r: from.r + delta.r, c: from.c + delta.c };
-
     const a = tiles.value[from.r]?.[from.c];
     const b = tiles.value[to.r]?.[to.c];
-
     if (isBoosterVal(a) || isBoosterVal(b)) {
-      await swapThenActivateBoosters(from, to);
+      try { await swapThenActivateBoosters(from, to); }
+      finally { animating.value = false; }
       startCell = null; startXY = null; return;
     }
-
     if (!canSwap(cells.value, from, to)) { startCell = null; startXY = null; return; }
-    if (!swapLeadsToMatchWithCells(tiles.value, cells.value, from, to)) { startCell = null; startXY = null; return; }
-
+    if (!wouldSwapCreateMatch(tiles.value, cells.value, from, to)) { startCell = null; startXY = null; return; }
     animating.value = true;
-    swap(tiles.value, from, to);
-    lastMoveDest.value = to;
-    pendingBooster.value = true;
-    await nextTick();
-    await sleep(120);
-
-    await animateResolveCascade();
-    animating.value = false;
-
+    try {
+      swap(tiles.value, from, to);
+      await nextTick();
+      await sleep(120);
+      await animateResolveCascade();
+    } finally {
+      animating.value = false;
+    }
     startCell = null; startXY = null;
   };
   const el = grid.value;

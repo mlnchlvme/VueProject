@@ -122,8 +122,8 @@ export function clearMatchesWithCells(tiles, matchedSet) {
 export function breakAdjacentCrates(cells, tilesClearedThisStep) {
   for (const key of tilesClearedThisStep) {
     const [r, c] = key.split(",").map(Number);
-    for (const [dr, dc] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-      const rr = r + dr, cc = c + dc;
+    for (const [deltaRow, deltaColumn] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const rr = r + deltaRow, cc = c + deltaColumn;
       if (rr < 0 || cc < 0 || rr >= cells.length || cc >= cells.length) continue;
       if (cells[rr][cc] === CellType.Crate) {
         cells[rr][cc] = CellType.Empty;
@@ -176,13 +176,45 @@ export function resolveWithCells(tiles, cells, colors) {
   return changed;
 }
 
-export function swapLeadsToMatchWithCells(tiles, cells, a, b) {
-  if (!canSwap(cells, a, b)) return false;
-  swap(tiles, a, b);
-  const ok = findMatchesWithCells(tiles, cells).size > 0;
-  swap(tiles, a, b);
-  return ok;
+function virtualAt(tiles, a, b, r, c) {
+  if (r === a.r && c === a.c) return tiles[b.r][b.c];
+  if (r === b.r && c === b.c) return tiles[a.r][a.c];
+  return tiles[r][c];
 }
+
+function lineHasMatchVirtual(tiles, cells, a, b, r, c, dr, dc) {
+  const size = tiles.length;
+  const base = virtualAt(tiles, a, b, r, c);
+  if (!(base != null && base >= 0) || cells[r][c] !== CellType.Empty) return false;
+
+  let len = 1;
+  let rr = r + dr, cc = c + dc;
+  while (rr >= 0 && cc >= 0 && rr < size && cc < size) {
+    const v = virtualAt(tiles, a, b, rr, cc);
+    if (!(cells[rr][cc] === CellType.Empty && v != null && v >= 0 && v === base)) break;
+    len++; rr += dr; cc += dc;
+  }
+  rr = r - dr; cc = c - dc;
+  while (rr >= 0 && cc >= 0 && rr < size && cc < size) {
+    const v = virtualAt(tiles, a, b, rr, cc);
+    if (!(cells[rr][cc] === CellType.Empty && v != null && v >= 0 && v === base)) break;
+    len++; rr -= dr; cc -= dc;
+  }
+  return len >= 3;
+}
+
+export function wouldSwapCreateMatch(tiles, cells, a, b) {
+  if (!canSwap(cells, a, b)) return false;
+  if (a.r === b.r && a.c === b.c) return false;
+
+  if (lineHasMatchVirtual(tiles, cells, a, b, a.r, a.c, 0, 1)) return true;
+  if (lineHasMatchVirtual(tiles, cells, a, b, a.r, a.c, 1, 0)) return true;
+  if (lineHasMatchVirtual(tiles, cells, a, b, b.r, b.c, 0, 1)) return true;
+  if (lineHasMatchVirtual(tiles, cells, a, b, b.r, b.c, 1, 0)) return true;
+
+  return false;
+}
+
 
 function safeRandom2(tiles, cells, r, c, colors) {
   if (cells[r][c] !== CellType.Empty) return null;
