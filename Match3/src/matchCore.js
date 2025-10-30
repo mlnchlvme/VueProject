@@ -30,12 +30,12 @@ export const CellType = {
 };
 
 const Booster = {
-  Row:  -1,
-  Col:  -2,
+  Cross:  -1,
+  Bomb:  -2,
 };
 
 function isNormal(val){ return typeof val === "number" && val >= 0; }
-function isBooster(val){ return val === Booster.Row || val === Booster.Col; }
+function isBooster(val){ return val === Booster.Cross || val === Booster.Bomb; }
 
 export function createLevel({
   size = 8,
@@ -215,7 +215,6 @@ export function wouldSwapCreateMatch(tiles, cells, a, b) {
   return false;
 }
 
-
 function safeRandom2(tiles, cells, r, c, colors) {
   if (cells[r][c] !== CellType.Empty) return null;
   let tries = 0;
@@ -277,12 +276,12 @@ function countRun(tiles, cells, r, c, deltaRow, deltaColumn) {
 }
 
 function placeBoosterAt(tiles, pos, horizonthalCombo, verticalCombo) {
-  if (horizonthalCombo >= 4) {
-    tiles[pos.r][pos.c] = Booster.Col;
+  if (horizonthalCombo === 3 && verticalCombo === 3) {
+    tiles[pos.r][pos.c] = Booster.Bomb;
     return true;
   }
-  if (verticalCombo >= 4) {
-    tiles[pos.r][pos.c] = Booster.Row;
+  if (verticalCombo >= 4 || horizonthalCombo >= 4) {
+    tiles[pos.r][pos.c] = Booster.Cross;
     return true;
   }
   return false;
@@ -291,8 +290,19 @@ function placeBoosterAt(tiles, pos, horizonthalCombo, verticalCombo) {
 function clearLineByBooster(tiles, cells, pos, type) {
   const size = tiles.length;
   const cleared = new Set();
-  if (type === Booster.Row) {
+  if (type === Booster.Cross) {
     const r = pos.r;
+    const c = pos.c;
+
+    for (let r = 0; r < size; r++) {
+      if (cells[r][c] !== CellType.Block) {
+        if (cells[r][c] === CellType.Crate) cells[r][c] = CellType.Empty;
+        if (tiles[r][c] != null) {
+          tiles[r][c] = null;
+          cleared.add(`${r},${c}`);
+        }
+      }
+    }
     for (let c = 0; c < size; c++) {
       if (cells[r][c] !== CellType.Block) {
         if (cells[r][c] === CellType.Crate) cells[r][c] = CellType.Empty;
@@ -303,14 +313,17 @@ function clearLineByBooster(tiles, cells, pos, type) {
       }
     }
   }
-  if (type === Booster.Col) {
-    const c = pos.c;
-    for (let r = 0; r < size; r++) {
-      if (cells[r][c] !== CellType.Block) {
-        if (cells[r][c] === CellType.Crate) cells[r][c] = CellType.Empty;
-        if (tiles[r][c] != null) {
-          tiles[r][c] = null;
-          cleared.add(`${r},${c}`);
+  if (type === Booster.Bomb) {
+    const r0 = pos.r, c0 = pos.c;
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const rr = r0 + dr, cc = c0 + dc;
+        if (rr < 0 || cc < 0 || rr >= size || cc >= size) continue;
+        if (cells[rr][cc] === CellType.Block) continue;
+        if (cells[rr][cc] === CellType.Crate) cells[rr][cc] = CellType.Empty;
+        if (tiles[rr][cc] != null) {
+          tiles[rr][cc] = null;
+          cleared.add(`${rr},${cc}`);
         }
       }
     }
@@ -366,4 +379,39 @@ export function applyMove(tiles, cells, a, b, colors) {
   refillWithCells(tiles, cells, colors);
   resolveWithCells(tiles, cells, colors);
   return true;
+}
+
+export function getBoosterClears(tiles, cells, pos) {
+  if (!inBoundsRC(tiles.length, pos.r, pos.c)) return new Set();
+  const v = tiles[pos.r][pos.c];
+  if (!isBooster(v)) return new Set();
+
+  const size = tiles.length;
+  const cleared = new Set();
+
+  if (v === Booster.Cross) {
+    const r = pos.r, c = pos.c;
+    for (let cc = 0; cc < size; cc++) {
+      if (cells[r][cc] === CellType.Block) continue;
+      if (tiles[r][cc] != null) cleared.add(`${r},${cc}`);
+    }
+    for (let rr = 0; rr < size; rr++) {
+      if (cells[rr][c] === CellType.Block) continue;
+      if (tiles[rr][c] != null) cleared.add(`${rr},${c}`);
+    }
+  }
+
+  if (v === Booster.Bomb) {
+    const r0 = pos.r, c0 = pos.c;
+    for (let dr = -1; dr <= 1; dr++) {
+      for (let dc = -1; dc <= 1; dc++) {
+        const rr = r0 + dr, cc = c0 + dc;
+        if (rr < 0 || cc < 0 || rr >= size || cc >= size) continue;
+        if (cells[rr][cc] === CellType.Block) continue;
+        if (tiles[rr][cc] != null) cleared.add(`${rr},${cc}`);
+      }
+    }
+  }
+
+  return cleared;
 }

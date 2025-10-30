@@ -42,6 +42,7 @@
       </div>
 
       <div v-if="sweep.active" class="sweep" :style="sweepStyle"></div>
+      <div v-if="bombFlash.active" class="bomb-flash" :style="bombStyle"></div>
     </div>
   </div>
 </template>
@@ -61,12 +62,13 @@ import {
   refillWithCells,
   activateBooster,
   wouldSwapCreateMatch,
+  getBoosterClears,
 } from "./matchCore.js";
 
 const COLORS = 5;
 const PALETTE = ["#ffd166", "#06d6a0", "#ef476f", "#118ab2", "#c6a7ff"];
-const Booster = { Row: -1, Col: -2 };
-const isBoosterVal = (v) => v === Booster.Row || v === Booster.Col;
+const Booster = { Cross: -1, Bomb: -2 };
+const isBoosterVal = (v) => v === Booster.Cross || v === Booster.Bomb;
 
 const levels = ref([
   [
@@ -122,6 +124,21 @@ const animating = ref(false);
 
 const clearing = ref(new Set());
 const appearKeys = ref(new Set());
+const bombFlash = ref({ active: false, r: null, c: null });
+const bombStyle = computed(() => {
+  if (!bombFlash.value.active) return {};
+  const cell = 44; // 40 + 2+2
+  const top = bombFlash.value.r * cell + 2;
+  const left = bombFlash.value.c * cell + 2;
+  return {
+    top: `${top}px`,
+    left: `${left}px`,
+    width: `36px`,
+    height: `36px`,
+    animation: 'bombFlash 260ms ease-out forwards',
+  };
+});
+
 
 const grid = ref(null);
 
@@ -181,48 +198,62 @@ function tileStyle(val) {
   };
 }
 function boosterClass(v) {
-  if (v === Booster.Row) return "booster booster-row";
-  if (v === Booster.Col) return "booster booster-col";
+  if (v === Booster.Cross) return "booster booster-cross";
+  if (v === Booster.Bomb)  return "booster booster-bomb";
   return "";
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function buildBoosterSpawnsFromMatches(matchesSet) {
   const N = tiles.value.length;
-  const isIn = (r, c) => matchesSet.has(key(r, c));
-  const spawns = [];
+  const Key = (r, c) => `${r},${c}`;
+  const inMatchesSet = (r, c) => matchesSet.has(Key(r, c));
+
+  const mark = Array.from({ length: N }, () => new Uint8Array(N));
+  const spawns = new Map();
+
   for (let r = 0; r < N; r++) {
     let c = 0;
     while (c < N) {
-      if (!isIn(r, c)) { c++; continue; }
-      let start = c;
-      while (c < N && isIn(r, c)) c++;
+      if (!inMatchesSet(r, c)) { c++; continue; }
+      const start = c;
+      while (c < N && inMatchesSet(r, c)) c++;
       const len = c - start;
+      if (len >= 3) {
+        for (let x = start; x < c; x++) mark[r][x] += 1;
+      }
       if (len >= 4) {
         const mid = start + Math.floor(len / 2);
-        spawns.push({ r, c: mid, type: 'H' });
+        const key = Key(r, mid);
+        if (!spawns.has(key)) spawns.set(key, { r, c: mid, type: "Cross" });
       }
     }
   }
   for (let c = 0; c < N; c++) {
     let r = 0;
     while (r < N) {
-      if (!isIn(r, c)) { r++; continue; }
-      let start = r;
-      while (r < N && isIn(r, c)) r++;
+      if (!inMatchesSet(r, c)) { r++; continue; }
+      const start = r;
+      while (r < N && inMatchesSet(r, c)) r++;
       const len = r - start;
+      if (len >= 3) {
+        for (let y = start; y < r; y++) {
+          mark[y][c] += 1;
+          if (mark[y][c] >= 2) {
+            const key = Key(y, c);
+            spawns.set(key, { r: y, c, type: "Bomb" });
+          }
+        }
+      }
       if (len >= 4) {
         const mid = start + Math.floor(len / 2);
-        spawns.push({ r: mid, c, type: 'V' });
+        const key = Key(mid, c);
+        if (!spawns.has(key)) spawns.set(key, { r: mid, c, type: "Cross" });
       }
     }
   }
-  const dedup = new Map();
-  for (const s of spawns) {
-    const k = key(s.r, s.c);
-    if (!dedup.has(k)) dedup.set(k, s);
-  }
-  return [...dedup.values()];
+
+  return [...spawns.values()];
 }
 
 async function animateResolveCascade() {
@@ -235,8 +266,7 @@ async function animateResolveCascade() {
       if (cells.value[r][c] !== CellType.Empty) continue;
       const v = tiles.value[r][c];
       if (v == null || v < 0) continue;
-      if (type === 'H') tiles.value[r][c] = Booster.Col;
-      else tiles.value[r][c] = Booster.Row;
+      tiles.value[r][c] = (type === "Bomb") ? Booster.Bomb : Booster.Cross;
       matches.delete(key(r, c));
     }
 
@@ -308,15 +338,27 @@ function onTileClick(r, c) {
 async function runBooster(pos, v) {
   animating.value = true;
   try {
-    if (v === Booster.Row) sweep.value = { active: true, row: pos.r, col: null, type: 'row' };
-    else sweep.value = { active: true, row: null, col: pos.c, type: 'col' };
-    await nextTick();
-    await sleep(260);
-    sweep.value = { active: false, row: null, col: null, type: null };
+    const affected = getBoosterClears(tiles.value, cells.value, pos);
+    if (v === Booster.Cross) {
+      sweep.value = { active: true, row: pos.r, col: null, type: 'row' };
+      clearing.value = new Set(affected);
+      await nextTick(); await sleep(260);
+
+      sweep.value = { active: true, row: null, col: pos.c, type: 'col' };
+      await nextTick(); await sleep(260);
+
+      sweep.value = { active: false, row: null, col: null, type: null };
+    } else if (v === Booster.Bomb) {
+      bombFlash.value = { active: true, r: pos.r, c: pos.c };
+      clearing.value = new Set(affected);
+      await nextTick(); await sleep(260);
+      bombFlash.value = { active: false, r: null, c: null };
+    }
     activateBooster(tiles.value, cells.value, pos, COLORS);
     await nextTick();
     await animateResolveCascade();
   } finally {
+    clearing.value.clear();
     animating.value = false;
   }
 }
@@ -468,6 +510,22 @@ onMounted(() => {
   opacity: 0; transform: translateY(-12px) scale(0.9);
   animation: appear 180ms ease-out forwards;
 }
+.booster {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #fff;
+  border: 2px solid #333;
+  font-weight: 800;
+  font-size: 20px;
+  line-height: 1;
+  color: #333;
+}
+.booster-cross::after { content: "+"; }
+.booster-bomb::after  { content: "*"; }
 @keyframes appear { to { opacity: 1; transform: translateY(0) scale(1); } }
 .booster { background:#fff !important; border:2px solid #333 !important; }
 .g { width: 22px; height: 22px; }
@@ -479,6 +537,17 @@ onMounted(() => {
   background: radial-gradient(closest-side, rgba(255,255,255,0.8), rgba(255,255,255,0.2), rgba(255,255,255,0));
   mix-blend-mode: screen;
   border-radius: 8px;
+}
+.bomb-flash {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,230,120,0.9) 0%, rgba(255,180,0,0.65) 50%, rgba(255,140,0,0.0) 70%);
+  pointer-events: none;
+}
+@keyframes bombFlash {
+  0%   { transform: scale(0.6); opacity: 0.9; }
+  70%  { transform: scale(1.2); opacity: 0.6; }
+  100% { transform: scale(1.6); opacity: 0; }
 }
 @keyframes sweepX { to { transform: scaleX(1); } }
 @keyframes sweepY { to { transform: scaleY(1); } }
