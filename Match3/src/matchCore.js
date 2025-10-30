@@ -287,61 +287,58 @@ function placeBoosterAt(tiles, pos, horizonthalCombo, verticalCombo) {
   return false;
 }
 
-function clearLineByBooster(tiles, cells, pos, type) {
-  const size = tiles.length;
-  const cleared = new Set();
-  if (type === Booster.Cross) {
-    const r = pos.r;
-    const c = pos.c;
-
-    for (let r = 0; r < size; r++) {
-      if (cells[r][c] !== CellType.Block) {
-        if (cells[r][c] === CellType.Crate) cells[r][c] = CellType.Empty;
-        if (tiles[r][c] != null) {
-          tiles[r][c] = null;
-          cleared.add(`${r},${c}`);
-        }
-      }
-    }
-    for (let c = 0; c < size; c++) {
-      if (cells[r][c] !== CellType.Block) {
-        if (cells[r][c] === CellType.Crate) cells[r][c] = CellType.Empty;
-        if (tiles[r][c] != null) {
-          tiles[r][c] = null;
-          cleared.add(`${r},${c}`);
-        }
-      }
-    }
-  }
-  if (type === Booster.Bomb) {
-    const r0 = pos.r, c0 = pos.c;
-    for (let dr = -1; dr <= 1; dr++) {
-      for (let dc = -1; dc <= 1; dc++) {
-        const rr = r0 + dr, cc = c0 + dc;
-        if (rr < 0 || cc < 0 || rr >= size || cc >= size) continue;
-        if (cells[rr][cc] === CellType.Block) continue;
-        if (cells[rr][cc] === CellType.Crate) cells[rr][cc] = CellType.Empty;
-        if (tiles[rr][cc] != null) {
-          tiles[rr][cc] = null;
-          cleared.add(`${rr},${cc}`);
-        }
-      }
-    }
-  }
-  return cleared;
-}
-
 export function activateBooster(tiles, cells, pos, colors) {
   if (!inBoundsRC(tiles.length, pos.r, pos.c)) return false;
-  const v = tiles[pos.r][pos.c];
-  if (!isBooster(v)) return false;
-  const cleared = clearLineByBooster(tiles, cells, pos, v);
-  tiles[pos.r][pos.c] = null;
-  if (cleared.size > 0) breakAdjacentCrates(cells, cleared);
-  collapseWithCells(tiles, cells);
-  refillWithCells(tiles, cells, colors);
-  resolveWithCells(tiles, cells, colors);
-  return true;
+  const first = tiles[pos.r][pos.c];
+  if (!isBooster(first)) return false;
+
+  const size = tiles.length;
+  const visited = new Set();
+  const queue = [{ r: pos.r, c: pos.c }];
+  const totalCleared = new Set();
+  const K = (r,c) => `${r},${c}`;
+
+  while (queue.length) {
+    const cur = queue.shift();
+    const kcur = K(cur.r, cur.c);
+    if (visited.has(kcur)) continue;
+    if (!inBoundsRC(size, cur.r, cur.c)) continue;
+
+    const v = tiles[cur.r][cur.c];
+    if (!isBooster(v)) continue;
+
+    visited.add(kcur);
+
+    const affected = getBoosterClears(tiles, cells, cur);
+
+    for (const key of affected) {
+      const [r, c] = key.split(',').map(Number);
+      const tv = tiles[r][c];
+      totalCleared.add(key);
+      if (isBooster(tv) && key !== kcur && !visited.has(key)) {
+        queue.push({ r, c });
+      }
+    }
+
+    totalCleared.add(kcur);
+    tiles[cur.r][cur.c] = null;
+  }
+
+  for (const key of totalCleared) {
+    const [r, c] = key.split(',').map(Number);
+    if (cells[r][c] === CellType.Block) continue;
+    if (cells[r][c] === CellType.Crate) cells[r][c] = CellType.Empty;
+    if (tiles[r][c] != null) tiles[r][c] = null;
+  }
+
+  if (totalCleared.size > 0) {
+    breakAdjacentCrates(cells, totalCleared);
+    collapseWithCells(tiles, cells);
+    refillWithCells(tiles, cells, colors);
+    resolveWithCells(tiles, cells, colors);
+    return true;
+  }
+  return false;
 }
 
 export function applyMove(tiles, cells, a, b, colors) {

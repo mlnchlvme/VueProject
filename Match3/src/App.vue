@@ -60,7 +60,6 @@ import {
   breakAdjacentCrates,
   collapseWithCells,
   refillWithCells,
-  activateBooster,
   wouldSwapCreateMatch,
   getBoosterClears,
 } from "./matchCore.js";
@@ -127,7 +126,7 @@ const appearKeys = ref(new Set());
 const bombFlash = ref({ active: false, r: null, c: null });
 const bombStyle = computed(() => {
   if (!bombFlash.value.active) return {};
-  const cell = 44; // 40 + 2+2
+  const cell = 44;
   const top = bombFlash.value.r * cell + 2;
   const left = bombFlash.value.c * cell + 2;
   return {
@@ -138,7 +137,6 @@ const bombStyle = computed(() => {
     animation: 'bombFlash 260ms ease-out forwards',
   };
 });
-
 
 const grid = ref(null);
 
@@ -208,7 +206,6 @@ function buildBoosterSpawnsFromMatches(matchesSet) {
   const N = tiles.value.length;
   const Key = (r, c) => `${r},${c}`;
   const inMatchesSet = (r, c) => matchesSet.has(Key(r, c));
-
   const mark = Array.from({ length: N }, () => new Uint8Array(N));
   const spawns = new Map();
 
@@ -219,16 +216,15 @@ function buildBoosterSpawnsFromMatches(matchesSet) {
       const start = c;
       while (c < N && inMatchesSet(r, c)) c++;
       const len = c - start;
-      if (len >= 3) {
-        for (let x = start; x < c; x++) mark[r][x] += 1;
-      }
+      if (len >= 3) for (let x = start; x < c; x++) mark[r][x] += 1;
       if (len >= 4) {
         const mid = start + Math.floor(len / 2);
-        const key = Key(r, mid);
-        if (!spawns.has(key)) spawns.set(key, { r, c: mid, type: "Cross" });
+        const k = Key(r, mid);
+        if (!spawns.has(k)) spawns.set(k, { r, c: mid, type: "Cross" });
       }
     }
   }
+
   for (let c = 0; c < N; c++) {
     let r = 0;
     while (r < N) {
@@ -240,15 +236,15 @@ function buildBoosterSpawnsFromMatches(matchesSet) {
         for (let y = start; y < r; y++) {
           mark[y][c] += 1;
           if (mark[y][c] >= 2) {
-            const key = Key(y, c);
-            spawns.set(key, { r: y, c, type: "Bomb" });
+            const k = Key(y, c);
+            spawns.set(k, { r: y, c, type: "Bomb" });
           }
         }
       }
       if (len >= 4) {
         const mid = start + Math.floor(len / 2);
-        const key = Key(mid, c);
-        if (!spawns.has(key)) spawns.set(key, { r: mid, c, type: "Cross" });
+        const k = Key(mid, c);
+        if (!spawns.has(k)) spawns.set(k, { r: mid, c, type: "Cross" });
       }
     }
   }
@@ -328,39 +324,99 @@ const sweepStyle = computed(() => {
   }
 });
 
+function boosterTypeOf(v) { return v === Booster.Cross ? "Cross" : v === Booster.Bomb ? "Bomb" : null; }
+
+async function previewForType(pos, type) {
+  if (type === "Cross") {
+    sweep.value = { active: true, row: pos.r, col: null, type: 'row' };
+    await nextTick(); await sleep(220);
+    sweep.value = { active: true, row: null, col: pos.c, type: 'col' };
+    await nextTick(); await sleep(220);
+    sweep.value = { active: false, row: null, col: null, type: null };
+  } else if (type === "Bomb") {
+    bombFlash.value = { active: true, r: pos.r, c: pos.c };
+    await nextTick(); await sleep(260);
+    bombFlash.value = { active: false, r: null, c: null };
+  }
+}
+
+function applyClears(cleared) {
+  for (const k of cleared) {
+    const [r, c] = k.split(',').map(Number);
+    if (cells.value[r][c] === CellType.Block) continue;
+    if (cells.value[r][c] === CellType.Crate) cells.value[r][c] = CellType.Empty;
+    if (tiles.value[r][c] != null) tiles.value[r][c] = null;
+  }
+}
+
+function collectBoosterChain(startPos) {
+  const size = tiles.value.length;
+  const K = (r,c) => `${r},${c}`;
+  const visited = new Set();
+  const q = [];
+  const steps = [];
+  if (!inRange(startPos)) return steps;
+  const v0 = tiles.value[startPos.r][startPos.c];
+  if (!isBoosterVal(v0)) return steps;
+  q.push(startPos);
+  while (q.length) {
+    const cur = q.shift();
+    const kk = K(cur.r, cur.c);
+    if (visited.has(kk)) continue;
+    visited.add(kk);
+    const v = tiles.value[cur.r]?.[cur.c];
+    const t = boosterTypeOf(v);
+    if (!t) continue;
+    const affected = getBoosterClears(tiles.value, cells.value, cur);
+    for (const k of affected) {
+      const [r, c] = k.split(',').map(Number);
+      const tv = tiles.value[r]?.[c];
+      if (isBoosterVal(tv) && k !== kk && !visited.has(k)) q.push({ r, c });
+    }
+    steps.push({ pos: cur, type: t, cleared: affected });
+  }
+  return steps;
+  function inRange(p){ return p.r>=0 && p.c>=0 && p.r<size && p.c<size; }
+}
+
+async function runBoosterChain(startPos, force = false) {
+  if (animating.value && !force) return;
+  animating.value = true;
+  try {
+    const chain = collectBoosterChain(startPos);
+    if (!chain.length) { animating.value = false; return; }
+    for (const step of chain) {
+      const { pos, type, cleared } = step;
+      clearing.value = new Set(cleared);
+      await nextTick();
+      await previewForType(pos, type);
+      applyClears(cleared);
+      if (tiles.value[pos.r]?.[pos.c] != null) tiles.value[pos.r][pos.c] = null;
+      await nextTick();
+      await sleep(80);
+      clearing.value.clear();
+    }
+    collapseWithCells(tiles.value, cells.value);
+    await nextTick(); await sleep(120);
+    const newSpawns = [];
+    const N = tiles.value.length;
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++)
+      if (cells.value[r][c] === CellType.Empty && tiles.value[r][c] == null) newSpawns.push(`${r},${c}`);
+    refillWithCells(tiles.value, cells.value, COLORS);
+    appearKeys.value = new Set(newSpawns);
+    await nextTick(); await sleep(180);
+    appearKeys.value.clear();
+    await animateResolveCascade();
+  } finally {
+    animating.value = false;
+  }
+}
+
 function onTileClick(r, c) {
   if (animating.value) return;
   const v = tiles.value[r][c];
   if (!isBoosterVal(v)) return;
-  runBooster({ r, c }, v);
-}
-
-async function runBooster(pos, v) {
-  animating.value = true;
-  try {
-    const affected = getBoosterClears(tiles.value, cells.value, pos);
-    if (v === Booster.Cross) {
-      sweep.value = { active: true, row: pos.r, col: null, type: 'row' };
-      clearing.value = new Set(affected);
-      await nextTick(); await sleep(260);
-
-      sweep.value = { active: true, row: null, col: pos.c, type: 'col' };
-      await nextTick(); await sleep(260);
-
-      sweep.value = { active: false, row: null, col: null, type: null };
-    } else if (v === Booster.Bomb) {
-      bombFlash.value = { active: true, r: pos.r, c: pos.c };
-      clearing.value = new Set(affected);
-      await nextTick(); await sleep(260);
-      bombFlash.value = { active: false, r: null, c: null };
-    }
-    activateBooster(tiles.value, cells.value, pos, COLORS);
-    await nextTick();
-    await animateResolveCascade();
-  } finally {
-    clearing.value.clear();
-    animating.value = false;
-  }
+  runBoosterChain({ r, c });
 }
 
 function cellFromNode(node) {
@@ -385,19 +441,29 @@ const deltaMap = {
 };
 
 async function swapThenActivateBoosters(from, to) {
+  const preA = tiles.value[from.r][from.c];
+  const preB = tiles.value[to.r][to.c];
+
+  const targets = [];
+  if (isBoosterVal(preA)) targets.push({ r: to.r, c: to.c });
+  if (isBoosterVal(preB)) targets.push({ r: from.r, c: from.c });
+
   animating.value = true;
   try {
     swap(tiles.value, from, to);
     await nextTick();
     await sleep(120);
-    const posA = { r: from.r, c: from.c };
-    const posB = { r: to.r, c: to.c };
-    const list = [];
-    const vA = tiles.value[posA.r][posA.c];
-    const vB = tiles.value[posB.r][posB.c];
-    if (isBoosterVal(vA)) list.push({ pos: posA, v: vA });
-    if (isBoosterVal(vB)) list.push({ pos: posB, v: vB });
-    for (const item of list) { await runBooster(item.pos, item.v); }
+
+    if (targets.length) {
+      for (const pos of targets) {
+        await runBoosterChain(pos, true);
+      }
+    } else {
+      const vA = tiles.value[from.r][from.c];
+      const vB = tiles.value[to.r][to.c];
+      if (isBoosterVal(vA)) await runBoosterChain({ r: from.r, c: from.c }, true);
+      if (isBoosterVal(vB)) await runBoosterChain({ r: to.r, c: to.c }, true);
+    }
   } finally {
     animating.value = false;
   }
